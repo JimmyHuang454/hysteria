@@ -150,8 +150,8 @@ func (c *clientImpl) connect() error {
 	return nil
 }
 
-// openStream wraps the stream with QStream, which handles Close() properly
-func (c *clientImpl) openStream() (quic.Stream, error) {
+// OpenStream wraps the stream with QStream, which handles Close() properly
+func (c *clientImpl) OpenStream() (quic.Stream, error) {
 	stream, err := c.conn.OpenStream()
 	if err != nil {
 		return nil, err
@@ -160,7 +160,7 @@ func (c *clientImpl) openStream() (quic.Stream, error) {
 }
 
 func (c *clientImpl) TCP(addr string) (net.Conn, error) {
-	stream, err := c.openStream()
+	stream, err := c.OpenStream()
 	if err != nil {
 		if isQUICClosedError(err) {
 			// Connection is dead
