@@ -26,6 +26,8 @@ type Client interface {
 	TCP(addr string) (net.Conn, error)
 	UDP() (HyUDPConn, error)
 	Close() error
+	OpenStream() (quic.Stream, error)
+	GetQuicConn() quic.Connection
 }
 
 type HyUDPConn interface {
@@ -148,6 +150,10 @@ func (c *clientImpl) connect() error {
 		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: conn})
 	}
 	return nil
+}
+
+func (c *clientImpl) GetQuicConn() quic.Connection {
+	return c.conn
 }
 
 // OpenStream wraps the stream with QStream, which handles Close() properly
