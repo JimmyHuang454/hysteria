@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	coreErrs "github.com/apernet/hysteria/core/errors"
+	quic "github.com/apernet/quic-go"
 )
 
 // reconnectableClientImpl is a wrapper of Client, which can reconnect when the connection is closed,
@@ -16,6 +17,16 @@ type reconnectableClientImpl struct {
 	connectedFunc func(Client, int) // called when successfully connected
 	m             sync.Mutex
 	closed        bool // permanent close
+}
+
+// GetQuicConn implements Client.
+func (*reconnectableClientImpl) GetQuicConn() quic.Connection {
+	panic("unimplemented")
+}
+
+// OpenStream implements Client.
+func (*reconnectableClientImpl) OpenStream() (quic.Stream, error) {
+	panic("unimplemented")
 }
 
 func NewReconnectableClient(config *Config, connectedFunc func(Client, int), lazy bool) (Client, error) {
