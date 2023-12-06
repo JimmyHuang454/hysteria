@@ -23,10 +23,15 @@ import (
 	"github.com/apernet/hysteria/app/internal/utils"
 	"github.com/apernet/hysteria/core/server"
 	"github.com/apernet/hysteria/extras/auth"
+	"github.com/apernet/hysteria/extras/correctnet"
 	"github.com/apernet/hysteria/extras/masq"
 	"github.com/apernet/hysteria/extras/obfs"
 	"github.com/apernet/hysteria/extras/outbounds"
 	"github.com/apernet/hysteria/extras/trafficlogger"
+)
+
+const (
+	defaultListenAddr = ":443"
 )
 
 var serverCmd = &cobra.Command{
@@ -143,10 +148,11 @@ type serverConfigResolver struct {
 }
 
 type serverConfigACL struct {
-	File    string   `mapstructure:"file"`
-	Inline  []string `mapstructure:"inline"`
-	GeoIP   string   `mapstructure:"geoip"`
-	GeoSite string   `mapstructure:"geosite"`
+	File              string        `mapstructure:"file"`
+	Inline            []string      `mapstructure:"inline"`
+	GeoIP             string        `mapstructure:"geoip"`
+	GeoSite           string        `mapstructure:"geosite"`
+	GeoUpdateInterval time.Duration `mapstructure:"geoUpdateInterval"`
 }
 
 type serverConfigOutboundDirect struct {
@@ -208,13 +214,13 @@ type serverConfigMasquerade struct {
 func (c *serverConfig) fillConn(hyConfig *server.Config) error {
 	listenAddr := c.Listen
 	if listenAddr == "" {
-		listenAddr = ":443"
+		listenAddr = defaultListenAddr
 	}
 	uAddr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		return configError{Field: "listen", Err: err}
 	}
-	conn, err := net.ListenUDP("udp", uAddr)
+	conn, err := correctnet.ListenUDP("udp", uAddr)
 	if err != nil {
 		return configError{Field: "listen", Err: err}
 	}
@@ -465,6 +471,7 @@ func (c *serverConfig) fillOutboundConfig(hyConfig *server.Config) error {
 	gLoader := &utils.GeoLoader{
 		GeoIPFilename:   c.ACL.GeoIP,
 		GeoSiteFilename: c.ACL.GeoSite,
+		UpdateInterval:  c.ACL.GeoUpdateInterval,
 		DownloadFunc:    geoDownloadFunc,
 		DownloadErrFunc: geoDownloadErrFunc,
 	}
@@ -729,7 +736,11 @@ func runServer(cmd *cobra.Command, args []string) {
 	if err != nil {
 		logger.Fatal("failed to initialize server", zap.Error(err))
 	}
-	logger.Info("server up and running")
+	if config.Listen != "" {
+		logger.Info("server up and running", zap.String("listen", config.Listen))
+	} else {
+		logger.Info("server up and running", zap.String("listen", defaultListenAddr))
+	}
 
 	if !disableUpdateCheck {
 		go runCheckUpdateServer()
@@ -742,7 +753,7 @@ func runServer(cmd *cobra.Command, args []string) {
 
 func runTrafficStatsServer(listen string, handler http.Handler) {
 	logger.Info("traffic stats server up and running", zap.String("listen", listen))
-	if err := http.ListenAndServe(listen, handler); err != nil {
+	if err := correctnet.HTTPListenAndServe(listen, handler); err != nil {
 		logger.Fatal("failed to serve traffic stats", zap.Error(err))
 	}
 }

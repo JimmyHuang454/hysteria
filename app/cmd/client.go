@@ -23,6 +23,7 @@ import (
 	"github.com/apernet/hysteria/app/internal/url"
 	"github.com/apernet/hysteria/app/internal/utils"
 	"github.com/apernet/hysteria/core/client"
+	"github.com/apernet/hysteria/extras/correctnet"
 	"github.com/apernet/hysteria/extras/obfs"
 	"github.com/apernet/hysteria/extras/transport/udphop"
 )
@@ -402,8 +403,8 @@ func runClient(cmd *cobra.Command, args []string) {
 		logger.Fatal("failed to load client config", zap.Error(err))
 	}
 
-	c, err := client.NewReconnectableClient(hyConfig, func(c client.Client, count int) {
-		connectLog(count)
+	c, err := client.NewReconnectableClient(hyConfig, func(c client.Client, info *client.HandshakeInfo, count int) {
+		connectLog(info, count)
 		// On the client side, we start checking for updates after we successfully connect
 		// to the server, which, depending on whether lazy mode is enabled, may or may not
 		// be immediately after the client starts. We don't want the update check request
@@ -504,7 +505,7 @@ func clientSOCKS5(config socks5Config, c client.Client) error {
 	if config.Listen == "" {
 		return configError{Field: "listen", Err: errors.New("listen address is empty")}
 	}
-	l, err := net.Listen("tcp", config.Listen)
+	l, err := correctnet.Listen("tcp", config.Listen)
 	if err != nil {
 		return configError{Field: "listen", Err: err}
 	}
@@ -529,7 +530,7 @@ func clientHTTP(config httpConfig, c client.Client) error {
 	if config.Listen == "" {
 		return configError{Field: "listen", Err: errors.New("listen address is empty")}
 	}
-	l, err := net.Listen("tcp", config.Listen)
+	l, err := correctnet.Listen("tcp", config.Listen)
 	if err != nil {
 		return configError{Field: "listen", Err: err}
 	}
@@ -562,7 +563,7 @@ func clientTCPForwarding(entries []tcpForwardingEntry, c client.Client) error {
 		if e.Remote == "" {
 			return configError{Field: "remote", Err: errors.New("remote address is empty")}
 		}
-		l, err := net.Listen("tcp", e.Listen)
+		l, err := correctnet.Listen("tcp", e.Listen)
 		if err != nil {
 			return configError{Field: "listen", Err: err}
 		}
@@ -589,7 +590,7 @@ func clientUDPForwarding(entries []udpForwardingEntry, c client.Client) error {
 		if e.Remote == "" {
 			return configError{Field: "remote", Err: errors.New("remote address is empty")}
 		}
-		l, err := net.ListenPacket("udp", e.Listen)
+		l, err := correctnet.ListenPacket("udp", e.Listen)
 		if err != nil {
 			return configError{Field: "listen", Err: err}
 		}
@@ -699,8 +700,11 @@ func (f *adaptiveConnFactory) New(addr net.Addr) (net.PacketConn, error) {
 	}
 }
 
-func connectLog(count int) {
-	logger.Info("connected to server", zap.Int("count", count))
+func connectLog(info *client.HandshakeInfo, count int) {
+	logger.Info("connected to server",
+		zap.Bool("udpEnabled", info.UDPEnabled),
+		zap.Uint64("tx", info.Tx),
+		zap.Int("count", count))
 }
 
 type socks5Logger struct{}
