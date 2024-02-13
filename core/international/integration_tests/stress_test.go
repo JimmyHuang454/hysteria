@@ -14,7 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/apernet/hysteria/core/client"
-	"github.com/apernet/hysteria/core/internal/integration_tests/mocks"
+	"github.com/apernet/hysteria/core/international/integration_tests/mocks"
 	"github.com/apernet/hysteria/core/server"
 )
 

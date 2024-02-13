@@ -10,7 +10,7 @@ import (
 
 	"github.com/apernet/hysteria/core/client"
 	coreErrs "github.com/apernet/hysteria/core/errors"
-	"github.com/apernet/hysteria/core/internal/integration_tests/mocks"
+	"github.com/apernet/hysteria/core/international/integration_tests/mocks"
 	"github.com/apernet/hysteria/core/server"
 )
 

@@ -74,6 +74,7 @@ func WriteTCPRequest(w io.Writer, addr string) error {
 		int(quicvarint.Len(uint64(paddingLen))) + paddingLen
 	buf := make([]byte, sz)
 	i := varintPut(buf, FrameTypeTCPRequest)
+
 	i += varintPut(buf[i:], uint64(addrLen))
 	i += copy(buf[i:], addr)
 	i += varintPut(buf[i:], uint64(paddingLen))

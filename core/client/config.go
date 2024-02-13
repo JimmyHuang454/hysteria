@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/apernet/hysteria/core/errors"
-	"github.com/apernet/hysteria/core/internal/pmtud"
+	"github.com/apernet/hysteria/core/international/pmtud"
 )
 
 const (

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	coreErrs "github.com/apernet/hysteria/core/errors"
-	"github.com/apernet/hysteria/core/internal/congestion"
-	"github.com/apernet/hysteria/core/internal/protocol"
-	"github.com/apernet/hysteria/core/internal/utils"
+	"github.com/apernet/hysteria/core/international/congestion"
+	"github.com/apernet/hysteria/core/international/protocol"
+	"github.com/apernet/hysteria/core/international/utils"
 
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"

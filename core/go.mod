@@ -10,6 +10,8 @@ require (
 	golang.org/x/time v0.4.0
 )
 
+replace github.com/apernet/quic-go => ../../hy_quic_go/quic-go/
+
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect

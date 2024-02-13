@@ -11,7 +11,7 @@ import (
 	"go.uber.org/goleak"
 
 	coreErrs "github.com/apernet/hysteria/core/errors"
-	"github.com/apernet/hysteria/core/internal/protocol"
+	"github.com/apernet/hysteria/core/international/protocol"
 )
 
 func TestUDPSessionManager(t *testing.T) {
