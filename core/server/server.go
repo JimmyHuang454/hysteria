@@ -166,6 +166,7 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						&udpIOImpl{h.conn, id, h.config.TrafficLogger, h.config.Outbound},
 						&udpEventLoggerImpl{h.conn, id, h.config.EventLogger},
 						h.config.UDPIdleTimeout)
+					sm.UdpSessionHijacker = h.config.UdpSessionHijacker
 					h.udpSM = sm
 					go sm.Run()
 				}()

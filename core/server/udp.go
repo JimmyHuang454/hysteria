@@ -113,6 +113,8 @@ type udpSessionManager struct {
 
 	mutex sync.RWMutex
 	m     map[uint32]*udpSessionEntry
+
+	UdpSessionHijacker func(*udpSessionEntry)
 }
 
 func newUDPSessionManager(io udpIO, eventLogger udpEventLogger, idleTimeout time.Duration) *udpSessionManager {
@@ -210,6 +212,9 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 		m.mutex.Lock()
 		m.m[msg.SessionID] = entry
 		m.mutex.Unlock()
+		if m.UdpSessionHijacker != nil {
+			m.UdpSessionHijacker(entry)
+		}
 	}
 
 	// Feed the message to the session
