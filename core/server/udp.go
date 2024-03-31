@@ -28,7 +28,7 @@ type udpEventLogger interface {
 	Close(sessionID uint32, err error)
 }
 
-type udpSessionEntry struct {
+type UdpSessionEntry struct {
 	ID      uint32
 	Conn    UDPConn
 	D       *frag.Defragger
@@ -41,7 +41,7 @@ type udpSessionEntry struct {
 // the message is written to the session's UDP connection, and the number of bytes
 // written is returned.
 // Otherwise, 0 and nil are returned.
-func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
+func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 	e.Last.Set(time.Now())
 	dfMsg := e.D.Feed(msg)
 	if dfMsg == nil {
@@ -54,7 +54,7 @@ func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 // and sends using the provided io.
 // Exit and returns error when either the underlying UDP connection returns
 // error (e.g. closed), or the provided io returns error when sending.
-func (e *udpSessionEntry) ReceiveLoop(io udpIO) error {
+func (e *UdpSessionEntry) ReceiveLoop(io udpIO) error {
 	udpBuf := make([]byte, protocol.MaxUDPSize)
 	msgBuf := make([]byte, protocol.MaxUDPSize)
 	for {
@@ -112,9 +112,9 @@ type udpSessionManager struct {
 	idleTimeout time.Duration
 
 	mutex sync.RWMutex
-	m     map[uint32]*udpSessionEntry
+	m     map[uint32]*UdpSessionEntry
 
-	UdpSessionHijacker func(*udpSessionEntry)
+	UdpSessionHijacker func(*UdpSessionEntry)
 }
 
 func newUDPSessionManager(io udpIO, eventLogger udpEventLogger, idleTimeout time.Duration) *udpSessionManager {
@@ -122,7 +122,7 @@ func newUDPSessionManager(io udpIO, eventLogger udpEventLogger, idleTimeout time
 		io:          io,
 		eventLogger: eventLogger,
 		idleTimeout: idleTimeout,
-		m:           make(map[uint32]*udpSessionEntry),
+		m:           make(map[uint32]*UdpSessionEntry),
 	}
 }
 
@@ -185,7 +185,7 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 			m.eventLogger.Close(msg.SessionID, err)
 			return
 		}
-		entry = &udpSessionEntry{
+		entry = &UdpSessionEntry{
 			ID:   msg.SessionID,
 			Conn: conn,
 			D:    &frag.Defragger{},
