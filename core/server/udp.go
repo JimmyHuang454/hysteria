@@ -8,6 +8,7 @@ import (
 
 	"github.com/apernet/quic-go"
 
+	"github.com/apernet/hysteria/core/client"
 	"github.com/apernet/hysteria/core/international/frag"
 	"github.com/apernet/hysteria/core/international/protocol"
 	"github.com/apernet/hysteria/core/international/utils"
@@ -34,6 +35,10 @@ type UdpSessionEntry struct {
 	D       *frag.Defragger
 	Last    *utils.AtomicTime
 	Timeout bool // true if the session is closed due to timeout
+
+	IsHijack  bool
+	ReceiveCh chan *protocol.UDPMessage
+	SendCh    chan *protocol.UDPMessage
 }
 
 // Feed feeds a UDP message to the session.
@@ -47,6 +52,10 @@ func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 	if dfMsg == nil {
 		return 0, nil
 	}
+	if e.IsHijack {
+		e.ReceiveCh <- msg
+		return 0, nil
+	}
 	return e.Conn.WriteTo(dfMsg.Data, dfMsg.Addr)
 }
 
@@ -57,22 +66,27 @@ func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 func (e *UdpSessionEntry) ReceiveLoop(io udpIO) error {
 	udpBuf := make([]byte, protocol.MaxUDPSize)
 	msgBuf := make([]byte, protocol.MaxUDPSize)
+	var msg *protocol.UDPMessage
 	for {
-		udpN, rAddr, err := e.Conn.ReadFrom(udpBuf)
-		if err != nil {
-			return err
-		}
 		e.Last.Set(time.Now())
+		if e.IsHijack {
+			msg = <-e.SendCh
+		} else {
+			udpN, rAddr, err := e.Conn.ReadFrom(udpBuf)
+			if err != nil {
+				return err
+			}
 
-		msg := &protocol.UDPMessage{
-			SessionID: e.ID,
-			PacketID:  0,
-			FragID:    0,
-			FragCount: 1,
-			Addr:      rAddr,
-			Data:      udpBuf[:udpN],
+			msg = &protocol.UDPMessage{
+				SessionID: e.ID,
+				PacketID:  0,
+				FragID:    0,
+				FragCount: 1,
+				Addr:      rAddr,
+				Data:      udpBuf[:udpN],
+			}
 		}
-		err = sendMessageAutoFrag(io, msgBuf, msg)
+		err := sendMessageAutoFrag(io, msgBuf, msg)
 		if err != nil {
 			return err
 		}
@@ -213,6 +227,7 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 		m.m[msg.SessionID] = entry
 		m.mutex.Unlock()
 		if m.UdpSessionHijacker != nil {
+			entry.IsHijack = true
 			m.UdpSessionHijacker(entry)
 		}
 	}
