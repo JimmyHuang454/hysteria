@@ -8,7 +8,6 @@ import (
 
 	"github.com/apernet/quic-go"
 
-	"github.com/apernet/hysteria/core/client"
 	"github.com/apernet/hysteria/core/international/frag"
 	"github.com/apernet/hysteria/core/international/protocol"
 	"github.com/apernet/hysteria/core/international/utils"
@@ -91,6 +90,11 @@ func (e *UdpSessionEntry) ReceiveLoop(io udpIO) error {
 			return err
 		}
 	}
+}
+
+func (e *UdpSessionEntry) Close() {
+	close(e.ReceiveCh)
+	close(e.SendCh)
 }
 
 // sendMessageAutoFrag tries to send a UDP message as a whole first,
@@ -200,10 +204,12 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 			return
 		}
 		entry = &UdpSessionEntry{
-			ID:   msg.SessionID,
-			Conn: conn,
-			D:    &frag.Defragger{},
-			Last: utils.NewAtomicTime(time.Now()),
+			ID:        msg.SessionID,
+			Conn:      conn,
+			D:         &frag.Defragger{},
+			Last:      utils.NewAtomicTime(time.Now()),
+			ReceiveCh: make(chan *protocol.UDPMessage, 1024),
+			SendCh:    make(chan *protocol.UDPMessage, 1024),
 		}
 		// Start the receive loop for this session
 		go func() {
