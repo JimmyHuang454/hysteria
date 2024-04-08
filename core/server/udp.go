@@ -132,7 +132,7 @@ type udpSessionManager struct {
 	mutex sync.RWMutex
 	m     map[uint32]*UdpSessionEntry
 
-	UdpSessionHijacker func(*UdpSessionEntry)
+	UdpSessionHijacker func(*UdpSessionEntry, string)
 }
 
 func newUDPSessionManager(io udpIO, eventLogger udpEventLogger, idleTimeout time.Duration) *udpSessionManager {
@@ -234,7 +234,7 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 		m.mutex.Unlock()
 		if m.UdpSessionHijacker != nil {
 			entry.IsHijack = true
-			m.UdpSessionHijacker(entry)
+			m.UdpSessionHijacker(entry, msg.Addr)
 		}
 	}
 

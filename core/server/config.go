@@ -35,7 +35,7 @@ type Config struct {
 	MasqHandler           http.Handler
 
 	StreamHijacker     func(http3.FrameType, quic.Connection, quic.Stream, error) (hijacked bool, err error)
-	UdpSessionHijacker func(*UdpSessionEntry)
+	UdpSessionHijacker func(*UdpSessionEntry, string)
 }
 
 // fill fills the fields that are not set by the user with default values when possible,
