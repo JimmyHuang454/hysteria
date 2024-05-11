@@ -10,7 +10,7 @@ require (
 	golang.org/x/time v0.5.0
 )
 
-//replace github.com/apernet/quic-go => ../../hy_quic_go/quic-go/
+//replace github.com/apernet/quic-go => ../../quic-go/
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect

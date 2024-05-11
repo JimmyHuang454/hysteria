@@ -191,7 +191,7 @@ func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, id quic.ConnectionT
 	switch ft {
 	case protocol.FrameTypeTCPRequest:
 		if h.config.StreamHijacker != nil {
-			h.config.StreamHijacker(ft, conn, stream, err)
+			h.config.StreamHijacker(ft, h.conn, stream, err)
 		} else {
 			go h.handleTCPRequest(stream)
 		}
