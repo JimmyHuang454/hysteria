@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	coreErrs "github.com/apernet/hysteria/core/v2/errors"
+	"github.com/apernet/quic-go"
 )
 
 // reconnectableClientImpl is a wrapper of Client, which can reconnect when the connection is closed,
