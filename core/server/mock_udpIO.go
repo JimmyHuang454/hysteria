@@ -3,7 +3,7 @@
 package server
 
 import (
-	protocol "github.com/apernet/hysteria/core/international/protocol"
+	protocol "github.com/apernet/hysteria/core/v2/international/protocol"
 	mock "github.com/stretchr/testify/mock"
 )
 

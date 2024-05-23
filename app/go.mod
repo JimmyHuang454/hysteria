@@ -1,11 +1,11 @@
-module github.com/apernet/hysteria/app
+module github.com/apernet/hysteria/app/v2
 
 go 1.21
 
 require (
 	github.com/apernet/go-tproxy v0.0.0-20230809025308-8f4723fd742f
-	github.com/apernet/hysteria/core v0.0.0-00010101000000-000000000000
-	github.com/apernet/hysteria/extras v0.0.0-00010101000000-000000000000
+	github.com/apernet/hysteria/core/v2 v2.0.0-00010101000000-000000000000
+	github.com/apernet/hysteria/extras/v2 v2.0.0-00010101000000-000000000000
 	github.com/apernet/sing-tun v0.2.6-0.20240323130332-b9f6511036ad
 	github.com/caddyserver/certmagic v0.17.2
 	github.com/mdp/qrterminal/v3 v3.1.1
@@ -16,12 +16,12 @@ require (
 	github.com/stretchr/testify v1.8.4
 	github.com/txthinking/socks5 v0.0.0-20230325130024-4230056ae301
 	go.uber.org/zap v1.24.0
-	golang.org/x/exp v0.0.0-20221205204356-47842c84f3db
-	golang.org/x/sys v0.19.0
+	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
+	golang.org/x/sys v0.20.0
 )
 
 require (
-	github.com/apernet/quic-go v0.43.1-0.20240515053213-5e9e635fd9f0 // indirect
+	github.com/apernet/quic-go v0.44.1-0.20240520215222-bb2e53664023 // indirect
 	github.com/babolivier/go-doh-client v0.0.0-20201028162107-a76cff4cb8b6 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
@@ -55,17 +55,18 @@ require (
 	go.uber.org/mock v0.4.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.22.0 // indirect
-	golang.org/x/mod v0.12.0 // indirect
-	golang.org/x/net v0.24.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
-	golang.org/x/tools v0.11.1 // indirect
+	golang.org/x/crypto v0.23.0 // indirect
+	golang.org/x/mod v0.17.0 // indirect
+	golang.org/x/net v0.25.0 // indirect
+	golang.org/x/sync v0.7.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
+	golang.org/x/tools v0.21.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
 
-replace github.com/apernet/hysteria/core => ../core
+replace github.com/apernet/hysteria/core/v2 => ../core
 
-replace github.com/apernet/hysteria/extras => ../extras
+replace github.com/apernet/hysteria/extras/v2 => ../extras

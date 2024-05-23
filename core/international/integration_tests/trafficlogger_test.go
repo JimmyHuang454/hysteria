@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/apernet/hysteria/core/client"
-	"github.com/apernet/hysteria/core/international/integration_tests/mocks"
-	"github.com/apernet/hysteria/core/server"
+	"github.com/apernet/hysteria/core/v2/client"
+	"github.com/apernet/hysteria/core/v2/international/integration_tests/mocks"
+	"github.com/apernet/hysteria/core/v2/server"
 )
 
 // TestClientServerTrafficLoggerTCP tests that the traffic logger is correctly called for TCP connections,

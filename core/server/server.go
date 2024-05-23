@@ -9,9 +9,9 @@ import (
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
 
-	"github.com/apernet/hysteria/core/international/congestion"
-	"github.com/apernet/hysteria/core/international/protocol"
-	"github.com/apernet/hysteria/core/international/utils"
+	"github.com/apernet/hysteria/core/v2/international/congestion"
+	"github.com/apernet/hysteria/core/v2/international/protocol"
+	"github.com/apernet/hysteria/core/v2/international/utils"
 )
 
 const (
