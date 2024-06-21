@@ -20,6 +20,7 @@ const (
 type udpIO interface {
 	ReceiveMessage() (*protocol.UDPMessage, error)
 	SendMessage([]byte, *protocol.UDPMessage) error
+	Hook(data []byte, reqAddr *string) error
 	UDP(reqAddr string) (UDPConn, error)
 }
 
@@ -29,11 +30,12 @@ type udpEventLogger interface {
 }
 
 type UdpSessionEntry struct {
-	ID      uint32
-	Conn    UDPConn
-	D       *frag.Defragger
-	Last    *utils.AtomicTime
-	Timeout bool // true if the session is closed due to timeout
+	ID           uint32
+	Conn         UDPConn
+	OverrideAddr string // Ignore the address in the UDP message, always use this if not empty
+	D            *frag.Defragger
+	Last         *utils.AtomicTime
+	Timeout      bool // true if the session is closed due to timeout
 
 	IsHijack  bool
 	ReceiveCh chan *protocol.UDPMessage
@@ -55,7 +57,11 @@ func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 		e.ReceiveCh <- msg
 		return 0, nil
 	}
-	return e.Conn.WriteTo(dfMsg.Data, dfMsg.Addr)
+	if e.OverrideAddr != "" {
+		return e.Conn.WriteTo(dfMsg.Data, e.OverrideAddr)
+	} else {
+		return e.Conn.WriteTo(dfMsg.Data, dfMsg.Addr)
+	}
 }
 
 // ReceiveLoop receives incoming UDP packets, packs them into UDP messages,
@@ -197,7 +203,15 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 
 	// Create a new session if not exists
 	if entry == nil {
+		// Call the hook
+		origMsgAddr := msg.Addr
+		err := m.io.Hook(msg.Data, &msg.Addr)
+		if err != nil {
+			return
+		}
+		// Log the event
 		m.eventLogger.New(msg.SessionID, msg.Addr)
+		// Dial target & create a new session entry
 		conn, err := m.io.UDP(msg.Addr)
 		if err != nil {
 			m.eventLogger.Close(msg.SessionID, err)
@@ -210,6 +224,10 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 			Last:      utils.NewAtomicTime(time.Now()),
 			ReceiveCh: make(chan *protocol.UDPMessage, 1024),
 			SendCh:    make(chan *protocol.UDPMessage, 1024),
+		}
+		if origMsgAddr != msg.Addr {
+			// Hook changed the address, enable address override
+			entry.OverrideAddr = msg.Addr
 		}
 		// Start the receive loop for this session
 		go func() {
