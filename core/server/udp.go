@@ -29,7 +29,7 @@ type udpEventLogger interface {
 	Close(sessionID uint32, err error)
 }
 
-type udpSessionEntry struct {
+type UdpSessionEntry struct {
 	ID           uint32
 	OverrideAddr string // Ignore the address in the UDP message, always use this if not empty
 	OriginalAddr string // The original address in the UDP message
@@ -53,8 +53,8 @@ func newUDPSessionEntry(
 	id uint32, io udpIO,
 	dialFunc func(string, []byte) (UDPConn, string, error),
 	exitFunc func(error),
-) (e *udpSessionEntry) {
-	e = &udpSessionEntry{
+) (e *UdpSessionEntry) {
+	e = &UdpSessionEntry{
 		ID:   id,
 		D:    &frag.Defragger{},
 		Last: utils.NewAtomicTime(time.Now()),
@@ -69,7 +69,7 @@ func newUDPSessionEntry(
 
 // CloseWithErr closes the session and calls ExitFunc with the given error.
 // A nil error indicates the session is cleaned up due to timeout.
-func (e *udpSessionEntry) CloseWithErr(err error) {
+func (e *UdpSessionEntry) CloseWithErr(err error) {
 	// We need this lock to ensure not to create conn after session exit
 	e.connLock.Lock()
 
@@ -98,7 +98,7 @@ func (e *udpSessionEntry) CloseWithErr(err error) {
 // the message is written to the session's UDP connection, and the number of bytes
 // written is returned.
 // Otherwise, 0 and nil are returned.
-func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
+func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 	e.Last.Set(time.Now())
 	dfMsg := e.D.Feed(msg)
 	if dfMsg == nil {
@@ -127,7 +127,7 @@ func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 
 // initConn initializes the UDP connection of the session.
 // If no error is returned, the e.conn is set to the new connection.
-func (e *udpSessionEntry) initConn(firstMsg *protocol.UDPMessage) error {
+func (e *UdpSessionEntry) initConn(firstMsg *protocol.UDPMessage) error {
 	// We need this lock to ensure not to create conn after session exit
 	e.connLock.Lock()
 
@@ -163,13 +163,17 @@ func (e *udpSessionEntry) initConn(firstMsg *protocol.UDPMessage) error {
 // and sends using the IO.
 // Exit when either the underlying UDP connection returns error (e.g. closed),
 // or the IO returns error when sending.
-func (e *udpSessionEntry) receiveLoop() {
+func (e *UdpSessionEntry) receiveLoop() {
 	udpBuf := make([]byte, protocol.MaxUDPSize)
 	msgBuf := make([]byte, protocol.MaxUDPSize)
 	var msg *protocol.UDPMessage
 	for {
 		if e.IsHijack {
-			msg = <-e.SendCh
+			var ok bool
+			msg, ok = <-e.SendCh
+			if !ok {
+				return
+			}
 		} else {
 			udpN, rAddr, err := e.conn.ReadFrom(udpBuf)
 			if err != nil {
@@ -236,9 +240,9 @@ type udpSessionManager struct {
 	idleTimeout time.Duration
 
 	mutex sync.RWMutex
-	m     map[uint32]*udpSessionEntry
+	m     map[uint32]*UdpSessionEntry
 
-	UdpSessionHijacker func(*udpSessionEntry, string)
+	UdpSessionHijacker func(*UdpSessionEntry, string)
 }
 
 func newUDPSessionManager(io udpIO, eventLogger udpEventLogger, idleTimeout time.Duration) *udpSessionManager {
@@ -246,7 +250,7 @@ func newUDPSessionManager(io udpIO, eventLogger udpEventLogger, idleTimeout time
 		io:          io,
 		eventLogger: eventLogger,
 		idleTimeout: idleTimeout,
-		m:           make(map[uint32]*udpSessionEntry),
+		m:           make(map[uint32]*UdpSessionEntry),
 	}
 }
 
@@ -281,7 +285,7 @@ func (m *udpSessionManager) idleCleanupLoop(stopCh <-chan struct{}) {
 }
 
 func (m *udpSessionManager) cleanup(idleOnly bool) {
-	timeoutEntry := make([]*udpSessionEntry, 0, len(m.m))
+	timeoutEntry := make([]*UdpSessionEntry, 0, len(m.m))
 
 	// We use RLock here as we are only scanning the map, not deleting from it.
 	m.mutex.RLock()
@@ -341,6 +345,7 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 			entry.ReceiveCh = make(chan *protocol.UDPMessage, 1024)
 			entry.SendCh = make(chan *protocol.UDPMessage, 1024)
 			entry.IsHijack = true
+			go entry.receiveLoop()
 			m.UdpSessionHijacker(entry, msg.Addr)
 		}
 	}
