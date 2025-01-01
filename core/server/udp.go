@@ -169,30 +169,36 @@ func (e *udpSessionEntry) initConn(firstMsg *protocol.UDPMessage) error {
 func (e *udpSessionEntry) receiveLoop() {
 	udpBuf := make([]byte, protocol.MaxUDPSize)
 	msgBuf := make([]byte, protocol.MaxUDPSize)
+	var msg *protocol.UDPMessage
 	for {
-		udpN, rAddr, err := e.conn.ReadFrom(udpBuf)
-		if err != nil {
-			e.CloseWithErr(err)
-			return
-		}
-		e.Last.Set(time.Now())
+		if e.IsHijack {
+			msg = <-e.SendCh
+		} else {
+			udpN, rAddr, err := e.conn.ReadFrom(udpBuf)
+			if err != nil {
+				e.CloseWithErr(err)
+				return
+			}
+			e.Last.Set(time.Now())
 
-		if e.OriginalAddr != "" {
-			// Use the original address in the opposite direction,
-			// otherwise the QUIC clients or NAT on the client side
-			// may not treat it as the same UDP session.
-			rAddr = e.OriginalAddr
-		}
+			if e.OriginalAddr != "" {
+				// Use the original address in the opposite direction,
+				// otherwise the QUIC clients or NAT on the client side
+				// may not treat it as the same UDP session.
+				rAddr = e.OriginalAddr
+			}
 
-		msg := &protocol.UDPMessage{
-			SessionID: e.ID,
-			PacketID:  0,
-			FragID:    0,
-			FragCount: 1,
-			Addr:      rAddr,
-			Data:      udpBuf[:udpN],
+			msg = &protocol.UDPMessage{
+				SessionID: e.ID,
+				PacketID:  0,
+				FragID:    0,
+				FragCount: 1,
+				Addr:      rAddr,
+				Data:      udpBuf[:udpN],
+			}
+
 		}
-		err = sendMessageAutoFrag(e.IO, msgBuf, msg)
+		err := sendMessageAutoFrag(e.IO, msgBuf, msg)
 		if err != nil {
 			e.CloseWithErr(err)
 			return
