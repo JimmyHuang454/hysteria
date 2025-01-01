@@ -83,8 +83,9 @@ type serverConfigObfs struct {
 }
 
 type serverConfigTLS struct {
-	Cert string `mapstructure:"cert"`
-	Key  string `mapstructure:"key"`
+	Cert     string `mapstructure:"cert"`
+	Key      string `mapstructure:"key"`
+	SNIGuard string `mapstructure:"sniGuard"` // "disable", "dns-san", "strict"
 }
 
 type serverConfigACME struct {
@@ -203,6 +204,7 @@ type serverConfigOutboundDirect struct {
 	BindIPv4   string `mapstructure:"bindIPv4"`
 	BindIPv6   string `mapstructure:"bindIPv6"`
 	BindDevice string `mapstructure:"bindDevice"`
+	FastOpen   bool   `mapstructure:"fastOpen"`
 }
 
 type serverConfigOutboundSOCKS5 struct {
@@ -236,6 +238,7 @@ type serverConfigMasqueradeFile struct {
 type serverConfigMasqueradeProxy struct {
 	URL         string `mapstructure:"url"`
 	RewriteHost bool   `mapstructure:"rewriteHost"`
+	Insecure    bool   `mapstructure:"insecure"`
 }
 
 type serverConfigMasqueradeString struct {
@@ -291,30 +294,45 @@ func (c *serverConfig) fillTLSConfig(hyConfig *server.Config) error {
 		return configError{Field: "tls", Err: errors.New("cannot set both tls and acme")}
 	}
 	if c.TLS != nil {
+		// SNI guard
+		var sniGuard utils.SNIGuardFunc
+		switch strings.ToLower(c.TLS.SNIGuard) {
+		case "", "dns-san":
+			sniGuard = utils.SNIGuardDNSSAN
+		case "strict":
+			sniGuard = utils.SNIGuardStrict
+		case "disable":
+			sniGuard = nil
+		default:
+			return configError{Field: "tls.sniGuard", Err: errors.New("unsupported SNI guard")}
+		}
 		// Local TLS cert
 		if c.TLS.Cert == "" || c.TLS.Key == "" {
 			return configError{Field: "tls", Err: errors.New("empty cert or key path")}
 		}
+		certLoader := &utils.LocalCertificateLoader{
+			CertFile: c.TLS.Cert,
+			KeyFile:  c.TLS.Key,
+			SNIGuard: sniGuard,
+		}
 		// Try loading the cert-key pair here to catch errors early
 		// (e.g. invalid files or insufficient permissions)
-		certPEMBlock, err := os.ReadFile(c.TLS.Cert)
+		err := certLoader.InitializeCache()
 		if err != nil {
-			return configError{Field: "tls.cert", Err: err}
-		}
-		keyPEMBlock, err := os.ReadFile(c.TLS.Key)
-		if err != nil {
-			return configError{Field: "tls.key", Err: err}
-		}
-		_, err = tls.X509KeyPair(certPEMBlock, keyPEMBlock)
-		if err != nil {
-			return configError{Field: "tls", Err: fmt.Errorf("invalid cert-key pair: %w", err)}
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				if pathErr.Path == c.TLS.Cert {
+					return configError{Field: "tls.cert", Err: pathErr}
+				}
+				if pathErr.Path == c.TLS.Key {
+					return configError{Field: "tls.key", Err: pathErr}
+				}
+			}
+			return configError{Field: "tls", Err: err}
 		}
 		// Use GetCertificate instead of Certificates so that
 		// users can update the cert without restarting the server.
-		hyConfig.TLSConfig.GetCertificate = func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			cert, err := tls.LoadX509KeyPair(c.TLS.Cert, c.TLS.Key)
-			return &cert, err
-		}
+		hyConfig.TLSConfig.GetCertificate = certLoader.GetCertificate
 	} else {
 		// ACME
 		dataDir := c.ACME.Dir
@@ -502,18 +520,18 @@ func (c *serverConfig) fillQUICConfig(hyConfig *server.Config) error {
 }
 
 func serverConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outbounds.PluggableOutbound, error) {
-	var mode outbounds.DirectOutboundMode
+	opts := outbounds.DirectOutboundOptions{}
 	switch strings.ToLower(c.Mode) {
 	case "", "auto":
-		mode = outbounds.DirectOutboundModeAuto
+		opts.Mode = outbounds.DirectOutboundModeAuto
 	case "64":
-		mode = outbounds.DirectOutboundMode64
+		opts.Mode = outbounds.DirectOutboundMode64
 	case "46":
-		mode = outbounds.DirectOutboundMode46
+		opts.Mode = outbounds.DirectOutboundMode46
 	case "6":
-		mode = outbounds.DirectOutboundMode6
+		opts.Mode = outbounds.DirectOutboundMode6
 	case "4":
-		mode = outbounds.DirectOutboundMode4
+		opts.Mode = outbounds.DirectOutboundMode4
 	default:
 		return nil, configError{Field: "outbounds.direct.mode", Err: errors.New("unsupported mode")}
 	}
@@ -530,12 +548,14 @@ func serverConfigOutboundDirectToOutbound(c serverConfigOutboundDirect) (outboun
 		if len(c.BindIPv6) > 0 && ip6 == nil {
 			return nil, configError{Field: "outbounds.direct.bindIPv6", Err: errors.New("invalid IPv6 address")}
 		}
-		return outbounds.NewDirectOutboundBindToIPs(mode, ip4, ip6)
+		opts.BindIP4 = ip4
+		opts.BindIP6 = ip6
 	}
 	if bindDevice {
-		return outbounds.NewDirectOutboundBindToDevice(mode, c.BindDevice)
+		opts.DeviceName = c.BindDevice
 	}
-	return outbounds.NewDirectOutboundSimple(mode), nil
+	opts.FastOpen = c.FastOpen
+	return outbounds.NewDirectOutboundWithOptions(opts)
 }
 
 func serverConfigOutboundSOCKS5ToOutbound(c serverConfigOutboundSOCKS5) (outbounds.PluggableOutbound, error) {
@@ -788,6 +808,28 @@ func (c *serverConfig) fillMasqHandler(hyConfig *server.Config) error {
 		if err != nil {
 			return configError{Field: "masquerade.proxy.url", Err: err}
 		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return configError{Field: "masquerade.proxy.url", Err: fmt.Errorf("unsupported protocol scheme \"%s\"", u.Scheme)}
+		}
+		transport := http.DefaultTransport
+		if c.Masquerade.Proxy.Insecure {
+			transport = &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+				// use default configs from http.DefaultTransport
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			}
+		}
 		handler = &httputil.ReverseProxy{
 			Rewrite: func(r *httputil.ProxyRequest) {
 				r.SetURL(u)
@@ -797,6 +839,7 @@ func (c *serverConfig) fillMasqHandler(hyConfig *server.Config) error {
 					r.Out.Host = r.In.Host
 				}
 			},
+			Transport: transport,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 				logger.Error("HTTP reverse proxy error", zap.Error(err))
 				w.WriteHeader(http.StatusBadGateway)
