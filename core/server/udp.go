@@ -62,9 +62,6 @@ func newUDPSessionEntry(
 
 		DialFunc: dialFunc,
 		ExitFunc: exitFunc,
-
-		ReceiveCh: make(chan *protocol.UDPMessage, 1024),
-		SendCh:    make(chan *protocol.UDPMessage, 1024),
 	}
 
 	return
@@ -341,6 +338,8 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 		m.mutex.Unlock()
 
 		if m.UdpSessionHijacker != nil {
+			entry.ReceiveCh = make(chan *protocol.UDPMessage, 1024)
+			entry.SendCh = make(chan *protocol.UDPMessage, 1024)
 			entry.IsHijack = true
 			m.UdpSessionHijacker(entry, msg.Addr)
 		}
