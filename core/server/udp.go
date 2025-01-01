@@ -179,7 +179,6 @@ func (e *udpSessionEntry) receiveLoop() {
 				e.CloseWithErr(err)
 				return
 			}
-			e.Last.Set(time.Now())
 
 			if e.OriginalAddr != "" {
 				// Use the original address in the opposite direction,
@@ -198,6 +197,7 @@ func (e *udpSessionEntry) receiveLoop() {
 			}
 
 		}
+		e.Last.Set(time.Now())
 		err := sendMessageAutoFrag(e.IO, msgBuf, msg)
 		if err != nil {
 			e.CloseWithErr(err)
