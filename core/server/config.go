@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/apernet/hysteria/core/v2/errors"
-	"github.com/apernet/hysteria/core/v2/international/pmtud"
-	"github.com/apernet/hysteria/core/v2/international/utils"
+	"github.com/v2fly/hysteria/core/v2/errors"
+	"github.com/v2fly/hysteria/core/v2/international/pmtud"
+	"github.com/v2fly/hysteria/core/v2/international/utils"
 	"github.com/apernet/quic-go"
 )
 

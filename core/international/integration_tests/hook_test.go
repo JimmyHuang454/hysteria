@@ -5,9 +5,9 @@ import (
 	"net"
 	"testing"
 
-	"github.com/apernet/hysteria/core/v2/client"
-	"github.com/apernet/hysteria/core/v2/international/integration_tests/mocks"
-	"github.com/apernet/hysteria/core/v2/server"
+	"github.com/v2fly/hysteria/core/v2/client"
+	"github.com/v2fly/hysteria/core/v2/international/integration_tests/mocks"
+	"github.com/v2fly/hysteria/core/v2/server"
 	"github.com/apernet/quic-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"

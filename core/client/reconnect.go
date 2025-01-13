@@ -4,7 +4,7 @@ import (
 	"net"
 	"sync"
 
-	coreErrs "github.com/apernet/hysteria/core/v2/errors"
+	coreErrs "github.com/v2fly/hysteria/core/v2/errors"
 	"github.com/apernet/quic-go"
 )
 

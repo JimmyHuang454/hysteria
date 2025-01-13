@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/apernet/hysteria/core/v2/international/protocol"
+	"github.com/v2fly/hysteria/core/v2/international/protocol"
 )
 
 func TestFragUDPMessage(t *testing.T) {

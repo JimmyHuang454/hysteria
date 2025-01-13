@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/mock"
 	"golang.org/x/time/rate"
 
-	"github.com/apernet/hysteria/core/v2/client"
-	"github.com/apernet/hysteria/core/v2/international/integration_tests/mocks"
-	"github.com/apernet/hysteria/core/v2/server"
+	"github.com/v2fly/hysteria/core/v2/client"
+	"github.com/v2fly/hysteria/core/v2/international/integration_tests/mocks"
+	"github.com/v2fly/hysteria/core/v2/server"
 )
 
 type tcpStressor struct {

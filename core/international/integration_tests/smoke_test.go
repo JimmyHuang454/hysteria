@@ -8,10 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/apernet/hysteria/core/v2/client"
-	coreErrs "github.com/apernet/hysteria/core/v2/errors"
-	"github.com/apernet/hysteria/core/v2/international/integration_tests/mocks"
-	"github.com/apernet/hysteria/core/v2/server"
+	"github.com/v2fly/hysteria/core/v2/client"
+	coreErrs "github.com/v2fly/hysteria/core/v2/errors"
+	"github.com/v2fly/hysteria/core/v2/international/integration_tests/mocks"
+	"github.com/v2fly/hysteria/core/v2/server"
 )
 
 // Smoke tests that act as a sanity check for client & server to ensure they can talk to each other correctly.

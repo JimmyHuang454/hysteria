@@ -1,4 +1,4 @@
-module github.com/apernet/hysteria/core/v2
+module github.com/v2fly/hysteria/core/v2
 
 go 1.22
 
