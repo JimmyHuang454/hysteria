@@ -38,8 +38,10 @@ type HyUDPConn interface {
 }
 
 type HandshakeInfo struct {
-	UDPEnabled bool
-	Tx         uint64 // 0 if using BBR
+	UDPEnabled  bool
+	Tx          uint64 // 0 if using BBR
+	ServerAddr  net.Addr
+	ECHAccepted bool
 }
 
 func NewClient(config *Config) (Client, *HandshakeInfo, error) {
@@ -60,6 +62,7 @@ type clientImpl struct {
 	config *Config
 
 	pktConn net.PacketConn
+	tr      *quic.Transport
 	conn    *quic.Conn
 
 	udpSM *udpSessionManager
@@ -72,11 +75,12 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 	}
 	// Convert config to TLS config & QUIC config
 	tlsConfig := &tls.Config{
-		ServerName:            c.config.TLSConfig.ServerName,
-		InsecureSkipVerify:    c.config.TLSConfig.InsecureSkipVerify,
-		VerifyPeerCertificate: c.config.TLSConfig.VerifyPeerCertificate,
-		RootCAs:               c.config.TLSConfig.RootCAs,
-		GetClientCertificate:  c.config.TLSConfig.GetClientCertificate,
+		ServerName:                     c.config.TLSConfig.ServerName,
+		InsecureSkipVerify:             c.config.TLSConfig.InsecureSkipVerify,
+		VerifyPeerCertificate:          c.config.TLSConfig.VerifyPeerCertificate,
+		RootCAs:                        c.config.TLSConfig.RootCAs,
+		GetClientCertificate:           c.config.TLSConfig.GetClientCertificate,
+		EncryptedClientHelloConfigList: c.config.TLSConfig.ECHConfigList,
 	}
 	quicConfig := &quic.Config{
 		InitialStreamReceiveWindow:     c.config.QUICConfig.InitialStreamReceiveWindow,
@@ -88,7 +92,16 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		DisablePathMTUDiscovery:        c.config.QUICConfig.DisablePathMTUDiscovery,
 		EnableDatagrams:                true,
 		MaxDatagramFrameSize:           protocol.MaxDatagramFrameSize,
+		OmitMaxDatagramFrameSize:       true,
 		DisablePathManager:             true,
+		ChromeParrot:                   !c.config.QUICConfig.DisableChromeParrot,
+	}
+	tr := &quic.Transport{Conn: pktConn, DisableGSO: c.config.QUICConfig.DisableGSO}
+	if !c.config.QUICConfig.DisableChromeParrot {
+		// Chrome uses a zero-length source connection ID. This has to be set on the
+		// Transport, since it fixes the length at which incoming packets' connection
+		// IDs are parsed; leaving it default yields 4-byte IDs, visible on the wire.
+		tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
 	}
 	// Prepare RoundTripper
 	var conn *quic.Conn
@@ -96,7 +109,7 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		TLSClientConfig: tlsConfig,
 		QUICConfig:      quicConfig,
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			qc, err := quic.DialEarly(ctx, pktConn, c.config.ServerAddr, tlsCfg, cfg)
+			qc, err := tr.DialEarly(ctx, c.config.ServerAddr, tlsCfg, cfg)
 			if err != nil {
 				return nil, err
 			}
@@ -123,11 +136,13 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 		if conn != nil {
 			_ = conn.CloseWithError(closeErrCodeProtocolError, "")
 		}
+		_ = tr.Close()
 		_ = pktConn.Close()
 		return nil, coreErrs.ConnectError{Err: err}
 	}
 	if resp.StatusCode != protocol.StatusAuthOK {
 		_ = conn.CloseWithError(closeErrCodeProtocolError, "")
+		_ = tr.Close()
 		_ = pktConn.Close()
 		return nil, coreErrs.AuthError{StatusCode: resp.StatusCode}
 	}
@@ -136,8 +151,8 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 	var actualTx uint64
 	if authResp.RxAuto {
 		// Server asks client to use bandwidth detection,
-		// ignore local bandwidth config and use BBR
-		congestion.UseBBR(conn)
+		// ignore local bandwidth config and use the configured congestion controller.
+		congestion.UseConfigured(conn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
 	} else {
 		// actualTx = min(serverRx, clientTx)
 		actualTx = authResp.Rx
@@ -146,22 +161,25 @@ func (c *clientImpl) connect() (*HandshakeInfo, error) {
 			actualTx = c.config.BandwidthConfig.MaxTx
 		}
 		if actualTx > 0 {
-			congestion.UseBrutal(conn, actualTx)
+			congestion.UseBrutal(conn, actualTx, c.config.BandwidthConfig.DisableLossCompensation)
 		} else {
-			// We don't know our own bandwidth either, use BBR
-			congestion.UseBBR(conn)
+			// We don't know our own bandwidth either, use the configured congestion controller.
+			congestion.UseConfigured(conn, c.config.CongestionConfig.Type, c.config.CongestionConfig.BBRProfile)
 		}
 	}
 	_ = resp.Body.Close()
 
 	c.pktConn = pktConn
+	c.tr = tr
 	c.conn = conn
 	if authResp.UDPEnabled {
 		c.udpSM = newUDPSessionManager(&udpIOImpl{Conn: conn})
 	}
 	return &HandshakeInfo{
-		UDPEnabled: authResp.UDPEnabled,
-		Tx:         actualTx,
+		UDPEnabled:  authResp.UDPEnabled,
+		Tx:          actualTx,
+		ServerAddr:  c.config.ServerAddr,
+		ECHAccepted: conn.ConnectionState().TLS.ECHAccepted,
 	}, nil
 }
 
@@ -227,6 +245,7 @@ func (c *clientImpl) UDP() (HyUDPConn, error) {
 
 func (c *clientImpl) Close() error {
 	_ = c.conn.CloseWithError(closeErrCodeOK, "")
+	_ = c.tr.Close()
 	_ = c.pktConn.Close()
 	return nil
 }

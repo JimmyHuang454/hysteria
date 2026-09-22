@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/tls"
+	"errors"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -35,10 +37,12 @@ func convertToStdTLSConfig(config *Config) *tls.Config {
 		clientAuth = tls.NoClientCert
 	}
 	return http3.ConfigureTLSConfig(&tls.Config{
-		Certificates:   config.TLSConfig.Certificates,
-		GetCertificate: config.TLSConfig.GetCertificate,
-		ClientCAs:      config.TLSConfig.ClientCAs,
-		ClientAuth:     clientAuth,
+		Certificates:                config.TLSConfig.Certificates,
+		GetCertificate:              config.TLSConfig.GetCertificate,
+		ClientCAs:                   config.TLSConfig.ClientCAs,
+		ClientAuth:                  clientAuth,
+		EncryptedClientHelloKeys:    config.TLSConfig.ECHKeys,
+		GetEncryptedClientHelloKeys: config.TLSConfig.GetECHKeys,
 	})
 }
 
@@ -57,21 +61,45 @@ func NewServer(config *Config) (Server, error) {
 		DisablePathMTUDiscovery:        config.QUICConfig.DisablePathMTUDiscovery,
 		EnableDatagrams:                true,
 		MaxDatagramFrameSize:           protocol.MaxDatagramFrameSize,
+		AssumePeerMaxDatagramFrameSize: protocol.MaxDatagramFrameSize,
 		DisablePathManager:             true,
 	}
-	listener, err := quic.Listen(config.Conn, tlsConfig, quicConfig)
+	tr := &quic.Transport{
+		Conn:       config.Conn,
+		DisableGSO: config.QUICConfig.DisableGSO,
+	}
+	// A nil key means quic-go never sends stateless resets. Clients then have to
+	// wait for the idle timeout to notice the server is gone, so keep them on
+	// unless the user explicitly asks otherwise.
+	if !config.QUICConfig.DisableStatelessReset {
+		srk := config.StatelessResetKey
+		if srk == nil {
+			var k quic.StatelessResetKey
+			if _, err := crand.Read(k[:]); err != nil {
+				return nil, err
+			}
+			srk = &k
+		}
+		tr.StatelessResetKey = srk
+	}
+	listener, err := tr.Listen(tlsConfig, quicConfig)
 	if err != nil {
-		_ = config.Conn.Close()
+		err = errors.Join(err, tr.Close(), config.Conn.Close())
+		if config.Cleanup != nil {
+			err = errors.Join(err, config.Cleanup.Close())
+		}
 		return nil, err
 	}
 	return &serverImpl{
 		config:   config,
+		tr:       tr,
 		listener: listener,
 	}, nil
 }
 
 type serverImpl struct {
 	config   *Config
+	tr       *quic.Transport
 	listener *quic.Listener
 }
 
@@ -86,8 +114,10 @@ func (s *serverImpl) Serve() error {
 }
 
 func (s *serverImpl) Close() error {
-	err := s.listener.Close()
-	_ = s.config.Conn.Close()
+	err := errors.Join(s.listener.Close(), s.tr.Close(), s.config.Conn.Close())
+	if s.config.Cleanup != nil {
+		err = errors.Join(err, s.config.Cleanup.Close())
+	}
 	return err
 }
 
@@ -152,8 +182,8 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.authenticated = true
 			h.authID = id
 			if h.config.IgnoreClientBandwidth {
-				// Ignore client bandwidth, always use BBR
-				congestion.UseBBR(h.conn)
+				// Ignore client bandwidth and use the configured congestion controller.
+				congestion.UseConfigured(h.conn, h.config.CongestionConfig.Type, h.config.CongestionConfig.BBRProfile)
 				actualTx = 0
 			} else {
 				// actualTx = min(serverTx, clientRx)
@@ -163,10 +193,10 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					actualTx = h.config.BandwidthConfig.MaxTx
 				}
 				if actualTx > 0 {
-					congestion.UseBrutal(h.conn, actualTx)
+					congestion.UseBrutal(h.conn, actualTx, h.config.BandwidthConfig.DisableLossCompensation)
 				} else {
-					// Client doesn't know its own bandwidth, use BBR
-					congestion.UseBBR(h.conn)
+					// Client doesn't know its own bandwidth, use the configured congestion controller.
+					congestion.UseConfigured(h.conn, h.config.CongestionConfig.Type, h.config.CongestionConfig.BBRProfile)
 				}
 			}
 			// Auth OK, send response
@@ -390,6 +420,10 @@ func (io *udpIOImpl) Hook(data []byte, reqAddr *string) error {
 
 func (io *udpIOImpl) UDP(reqAddr string) (UDPConn, error) {
 	return io.Outbound.UDP(reqAddr)
+}
+
+func (io *udpIOImpl) CheckUDP(reqAddr string) error {
+	return io.Outbound.CheckUDP(reqAddr)
 }
 
 type udpEventLoggerImpl struct {

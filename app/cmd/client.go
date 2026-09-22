@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	stdHTTP "net/http"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -15,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,6 +28,7 @@ import (
 
 	"github.com/apernet/hysteria/app/v2/internal/forwarding"
 	"github.com/apernet/hysteria/app/v2/internal/http"
+	"github.com/apernet/hysteria/app/v2/internal/mimic"
 	"github.com/apernet/hysteria/app/v2/internal/proxymux"
 	"github.com/apernet/hysteria/app/v2/internal/redirect"
 	"github.com/apernet/hysteria/app/v2/internal/sockopts"
@@ -35,8 +40,16 @@ import (
 	"github.com/apernet/hysteria/core/v2/client"
 	"github.com/apernet/hysteria/extras/v2/correctnet"
 	"github.com/apernet/hysteria/extras/v2/obfs"
+	"github.com/apernet/hysteria/extras/v2/realm"
 	"github.com/apernet/hysteria/extras/v2/transport/udphop"
 )
+
+// Ref: https://ip.skk.moe/stun
+var defaultRealmSTUNServers = []string{
+	"stun.nextcloud.com:3478",
+	"stun.sip.us:3478",
+	"global.stun.twilio.com:3478",
+}
 
 // Client flags
 var (
@@ -46,7 +59,7 @@ var (
 var clientCmd = &cobra.Command{
 	Use:   "client",
 	Short: "Client mode",
-	Run:   runClient,
+	Run:   runClientCmd,
 }
 
 func init() {
@@ -59,27 +72,62 @@ func initClientFlags() {
 }
 
 type clientConfig struct {
-	Server        string                `mapstructure:"server"`
-	Auth          string                `mapstructure:"auth"`
-	Transport     clientConfigTransport `mapstructure:"transport"`
-	Obfs          clientConfigObfs      `mapstructure:"obfs"`
-	TLS           clientConfigTLS       `mapstructure:"tls"`
-	QUIC          clientConfigQUIC      `mapstructure:"quic"`
-	Bandwidth     clientConfigBandwidth `mapstructure:"bandwidth"`
-	FastOpen      bool                  `mapstructure:"fastOpen"`
-	Lazy          bool                  `mapstructure:"lazy"`
-	SOCKS5        *socks5Config         `mapstructure:"socks5"`
-	HTTP          *httpConfig           `mapstructure:"http"`
-	TCPForwarding []tcpForwardingEntry  `mapstructure:"tcpForwarding"`
-	UDPForwarding []udpForwardingEntry  `mapstructure:"udpForwarding"`
-	TCPTProxy     *tcpTProxyConfig      `mapstructure:"tcpTProxy"`
-	UDPTProxy     *udpTProxyConfig      `mapstructure:"udpTProxy"`
-	TCPRedirect   *tcpRedirectConfig    `mapstructure:"tcpRedirect"`
-	TUN           *tunConfig            `mapstructure:"tun"`
+	Server        string                 `mapstructure:"server"`
+	Auth          string                 `mapstructure:"auth"`
+	Realm         clientConfigRealm      `mapstructure:"realm"`
+	Transport     clientConfigTransport  `mapstructure:"transport"`
+	Obfs          clientConfigObfs       `mapstructure:"obfs"`
+	TLS           clientConfigTLS        `mapstructure:"tls"`
+	QUIC          clientConfigQUIC       `mapstructure:"quic"`
+	Mimic         mimicConfig            `mapstructure:"mimic"`
+	Congestion    clientConfigCongestion `mapstructure:"congestion"`
+	Bandwidth     clientConfigBandwidth  `mapstructure:"bandwidth"`
+	FastOpen      bool                   `mapstructure:"fastOpen"`
+	Lazy          bool                   `mapstructure:"lazy"`
+	SOCKS5        *socks5Config          `mapstructure:"socks5"`
+	HTTP          *httpConfig            `mapstructure:"http"`
+	TCPForwarding []tcpForwardingEntry   `mapstructure:"tcpForwarding"`
+	UDPForwarding []udpForwardingEntry   `mapstructure:"udpForwarding"`
+	TCPTProxy     *tcpTProxyConfig       `mapstructure:"tcpTProxy"`
+	UDPTProxy     *udpTProxyConfig       `mapstructure:"udpTProxy"`
+	TCPRedirect   *tcpRedirectConfig     `mapstructure:"tcpRedirect"`
+	TUN           *tunConfig             `mapstructure:"tun"`
+}
+
+type mimicConfig struct {
+	Enabled   bool     `mapstructure:"enabled"`
+	Interface string   `mapstructure:"interface"`
+	XDPMode   string   `mapstructure:"xdpMode"`
+	Path      string   `mapstructure:"path"`
+	ExtraArgs []string `mapstructure:"extraArgs"`
+}
+
+type clientConfigRealm struct {
+	STUNServers  []string               `mapstructure:"stunServers"`
+	STUNTimeout  time.Duration          `mapstructure:"stunTimeout"`
+	PunchTimeout time.Duration          `mapstructure:"punchTimeout"`
+	Insecure     bool                   `mapstructure:"insecure"`
+	IPMode       string                 `mapstructure:"ipMode"`
+	PortMapping  realmPortMappingConfig `mapstructure:"portMapping"`
+}
+
+func realmIPMode(mode string) (realm.AddrFamily, string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "dual":
+		return realm.AddrFamilyAny, "udp", nil
+	case "v4":
+		return realm.AddrFamilyIPv4, "udp4", nil
+	case "v6":
+		return realm.AddrFamilyIPv6, "udp6", nil
+	default:
+		return realm.AddrFamilyAny, "", fmt.Errorf("invalid ipMode %q (expected v4, v6, or dual)", mode)
+	}
 }
 
 type clientConfigTransportUDP struct {
-	HopInterval time.Duration `mapstructure:"hopInterval"`
+	HopInterval    time.Duration `mapstructure:"hopInterval"`
+	MinHopInterval time.Duration `mapstructure:"minHopInterval"`
+	MaxHopInterval time.Duration `mapstructure:"maxHopInterval"`
 }
 
 type clientConfigTransport struct {
@@ -91,9 +139,16 @@ type clientConfigObfsSalamander struct {
 	Password string `mapstructure:"password"`
 }
 
+type clientConfigObfsGecko struct {
+	Password      string `mapstructure:"password"`
+	MinPacketSize int    `mapstructure:"minPacketSize"`
+	MaxPacketSize int    `mapstructure:"maxPacketSize"`
+}
+
 type clientConfigObfs struct {
 	Type       string                     `mapstructure:"type"`
 	Salamander clientConfigObfsSalamander `mapstructure:"salamander"`
+	Gecko      clientConfigObfsGecko      `mapstructure:"gecko"`
 }
 
 type clientConfigTLS struct {
@@ -103,6 +158,7 @@ type clientConfigTLS struct {
 	CA                string `mapstructure:"ca"`
 	ClientCertificate string `mapstructure:"clientCertificate"`
 	ClientKey         string `mapstructure:"clientKey"`
+	ECH               string `mapstructure:"ech"`
 }
 
 type clientConfigQUIC struct {
@@ -113,6 +169,7 @@ type clientConfigQUIC struct {
 	MaxIdleTimeout              time.Duration            `mapstructure:"maxIdleTimeout"`
 	KeepAlivePeriod             time.Duration            `mapstructure:"keepAlivePeriod"`
 	DisablePathMTUDiscovery     bool                     `mapstructure:"disablePathMTUDiscovery"`
+	DisableChromeParrot         bool                     `mapstructure:"disableChromeParrot"`
 	Sockopts                    clientConfigQUICSockopts `mapstructure:"sockopts"`
 }
 
@@ -123,8 +180,14 @@ type clientConfigQUICSockopts struct {
 }
 
 type clientConfigBandwidth struct {
-	Up   string `mapstructure:"up"`
-	Down string `mapstructure:"down"`
+	Up                      string `mapstructure:"up"`
+	Down                    string `mapstructure:"down"`
+	DisableLossCompensation bool   `mapstructure:"disableLossCompensation"`
+}
+
+type clientConfigCongestion struct {
+	Type       string `mapstructure:"type"`
+	BBRProfile string `mapstructure:"bbrProfile"`
 }
 
 type socks5Config struct {
@@ -206,9 +269,51 @@ func (c *clientConfig) fillServerAddr(hyConfig *client.Config) error {
 	return nil
 }
 
-// fillConnFactory must be called after fillServerAddr, as we have different logic
-// for ConnFactory depending on whether we have a port hopping address.
+// fillConnFactory must be called after fillServerAddr, since the right kind
+// of inner conn (plain vs port-hopping) depends on the resolved server addr.
 func (c *clientConfig) fillConnFactory(hyConfig *client.Config) error {
+	so, err := c.socketOptions()
+	if err != nil {
+		return err
+	}
+	hopInterval, err := c.Transport.UDP.hopIntervalConfig()
+	if err != nil {
+		return configError{Field: "transport.udp", Err: err}
+	}
+	var openInner func() (net.PacketConn, error)
+	switch strings.ToLower(c.Transport.Type) {
+	case "", "udp":
+		if hyConfig.ServerAddr.Network() == "udphop" {
+			hopAddr := hyConfig.ServerAddr.(*udphop.UDPHopAddr)
+			openInner = func() (net.PacketConn, error) {
+				return udphop.NewUDPHopPacketConn(hopAddr, hopInterval, so.ListenUDP)
+			}
+		} else {
+			openInner = func() (net.PacketConn, error) {
+				return so.ListenUDP()
+			}
+		}
+	default:
+		return configError{Field: "transport.type", Err: errors.New("unsupported transport type")}
+	}
+	hyConfig.ConnFactory = &singleUseConnFactory{
+		Open: func() (net.PacketConn, error) {
+			conn, err := openInner()
+			if err != nil {
+				return nil, err
+			}
+			wrapped, err := c.wrapObfs(conn)
+			if err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			return wrapped, nil
+		},
+	}
+	return nil
+}
+
+func (c *clientConfig) socketOptions() (*sockopts.SocketOptions, error) {
 	so := &sockopts.SocketOptions{
 		BindInterface:       c.QUIC.Sockopts.BindInterface,
 		FirewallMark:        c.QUIC.Sockopts.FirewallMark,
@@ -217,49 +322,58 @@ func (c *clientConfig) fillConnFactory(hyConfig *client.Config) error {
 	if err := so.CheckSupported(); err != nil {
 		var unsupportedErr *sockopts.UnsupportedError
 		if errors.As(err, &unsupportedErr) {
-			return configError{
+			return nil, configError{
 				Field: "quic.sockopts." + unsupportedErr.Field,
 				Err:   errors.New("unsupported on this platform"),
 			}
 		}
-		return configError{Field: "quic.sockopts", Err: err}
+		return nil, configError{Field: "quic.sockopts", Err: err}
 	}
-	// Inner PacketConn
-	var newFunc func(addr net.Addr) (net.PacketConn, error)
-	switch strings.ToLower(c.Transport.Type) {
-	case "", "udp":
-		if hyConfig.ServerAddr.Network() == "udphop" {
-			hopAddr := hyConfig.ServerAddr.(*udphop.UDPHopAddr)
-			newFunc = func(addr net.Addr) (net.PacketConn, error) {
-				return udphop.NewUDPHopPacketConn(hopAddr, c.Transport.UDP.HopInterval, so.ListenUDP)
-			}
-		} else {
-			newFunc = func(addr net.Addr) (net.PacketConn, error) {
-				return so.ListenUDP()
-			}
-		}
-	default:
-		return configError{Field: "transport.type", Err: errors.New("unsupported transport type")}
-	}
-	// Obfuscation
-	var ob obfs.Obfuscator
-	var err error
+	return so, nil
+}
+
+func (c *clientConfig) wrapObfs(conn net.PacketConn) (net.PacketConn, error) {
 	switch strings.ToLower(c.Obfs.Type) {
 	case "", "plain":
-		// Keep it nil
+		return conn, nil
 	case "salamander":
-		ob, err = obfs.NewSalamanderObfuscator([]byte(c.Obfs.Salamander.Password))
+		wrapped, err := obfs.WrapPacketConnSalamander(conn, []byte(c.Obfs.Salamander.Password))
 		if err != nil {
-			return configError{Field: "obfs.salamander.password", Err: err}
+			return nil, configError{Field: "obfs.salamander.password", Err: err}
 		}
+		return wrapped, nil
+	case "gecko":
+		wrapped, err := obfs.WrapPacketConnGecko(conn, obfs.GeckoOptions{
+			Password:      []byte(c.Obfs.Gecko.Password),
+			MinPacketSize: c.Obfs.Gecko.MinPacketSize,
+			MaxPacketSize: c.Obfs.Gecko.MaxPacketSize,
+		})
+		if err != nil {
+			return nil, configError{Field: "obfs.gecko", Err: err}
+		}
+		return wrapped, nil
 	default:
-		return configError{Field: "obfs.type", Err: errors.New("unsupported obfuscation type")}
+		return nil, configError{Field: "obfs.type", Err: errors.New("unsupported obfuscation type")}
 	}
-	hyConfig.ConnFactory = &adaptiveConnFactory{
-		NewFunc:    newFunc,
-		Obfuscator: ob,
+}
+
+func (c clientConfigTransportUDP) hopIntervalConfig() (udphop.HopIntervalConfig, error) {
+	if c.HopInterval != 0 && (c.MinHopInterval != 0 || c.MaxHopInterval != 0) {
+		return udphop.HopIntervalConfig{}, errors.New("hopInterval cannot be used together with minHopInterval or maxHopInterval")
 	}
-	return nil
+	if c.MinHopInterval == 0 && c.MaxHopInterval == 0 {
+		if c.HopInterval == 0 {
+			return udphop.HopIntervalConfig{}, nil
+		}
+		return udphop.HopIntervalConfig{Min: c.HopInterval, Max: c.HopInterval}, nil
+	}
+	if c.MinHopInterval == 0 || c.MaxHopInterval == 0 {
+		return udphop.HopIntervalConfig{}, errors.New("minHopInterval and maxHopInterval must both be set")
+	}
+	return udphop.HopIntervalConfig{
+		Min: c.MinHopInterval,
+		Max: c.MaxHopInterval,
+	}, nil
 }
 
 func (c *clientConfig) fillAuth(hyConfig *client.Config) error {
@@ -321,6 +435,26 @@ func (c *clientConfig) fillTLSConfig(hyConfig *client.Config) error {
 			return certLoader.GetCertificate(nil)
 		}
 	}
+	if c.TLS.ECH != "" {
+		configList, err := utils.ParseECHConfigList(c.TLS.ECH)
+		if err != nil {
+			return configError{Field: "tls.ech", Err: err}
+		}
+		hyConfig.TLSConfig.ECHConfigList = configList
+	}
+	return nil
+}
+
+func (c *clientConfig) validateMimic() error {
+	if !c.Mimic.Enabled {
+		return nil
+	}
+	// Mimic matches traffic by a single ip:port. Port hopping moves the server
+	// port over a range, which would need one filter per port.
+	_, port, _ := parseServerAddrString(c.Server)
+	if isPortHoppingPort(port) {
+		return configError{Field: "mimic", Err: errors.New("cannot be used with port hopping")}
+	}
 	return nil
 }
 
@@ -333,6 +467,10 @@ func (c *clientConfig) fillQUICConfig(hyConfig *client.Config) error {
 		MaxIdleTimeout:                 c.QUIC.MaxIdleTimeout,
 		KeepAlivePeriod:                c.QUIC.KeepAlivePeriod,
 		DisablePathMTUDiscovery:        c.QUIC.DisablePathMTUDiscovery,
+		DisableChromeParrot:            c.QUIC.DisableChromeParrot,
+		// Mimic rewrites packets after they leave the socket, which corrupts
+		// every segment but the first of a GSO batch.
+		DisableGSO: c.Mimic.Enabled,
 	}
 	return nil
 }
@@ -351,6 +489,23 @@ func (c *clientConfig) fillBandwidthConfig(hyConfig *client.Config) error {
 		if err != nil {
 			return configError{Field: "bandwidth.down", Err: err}
 		}
+	}
+	hyConfig.BandwidthConfig.DisableLossCompensation = c.Bandwidth.DisableLossCompensation
+	return nil
+}
+
+func (c *clientConfig) fillCongestionConfig(hyConfig *client.Config) error {
+	normalizedType, err := normalizeCongestionType(c.Congestion.Type)
+	if err != nil {
+		return configError{Field: "congestion.type", Err: err}
+	}
+	hyConfig.CongestionConfig.Type = normalizedType
+	if normalizedType == congestionTypeBBR {
+		normalizedProfile, err := normalizeBBRProfile(c.Congestion.BBRProfile)
+		if err != nil {
+			return configError{Field: "congestion.bbrProfile", Err: err}
+		}
+		hyConfig.CongestionConfig.BBRProfile = normalizedProfile
 	}
 	return nil
 }
@@ -376,6 +531,9 @@ func (c *clientConfig) URI() string {
 	case "salamander":
 		q.Set("obfs", "salamander")
 		q.Set("obfs-password", c.Obfs.Salamander.Password)
+	case "gecko":
+		q.Set("obfs", "gecko")
+		q.Set("obfs-password", c.Obfs.Gecko.Password)
 	}
 	if c.TLS.SNI != "" {
 		q.Set("sni", c.TLS.SNI)
@@ -385,6 +543,13 @@ func (c *clientConfig) URI() string {
 	}
 	if c.TLS.PinSHA256 != "" {
 		q.Set("pinSHA256", normalizeCertHash(c.TLS.PinSHA256))
+	}
+	if c.TLS.ECH != "" {
+		// Resolve to the raw config list so the URI is self-contained
+		// (the source may be a file path, which is not portable).
+		if configList, err := utils.ParseECHConfigList(c.TLS.ECH); err == nil {
+			q.Set("ech", base64.StdEncoding.EncodeToString(configList))
+		}
 	}
 	var user *url.Userinfo
 	if c.Auth != "" {
@@ -420,11 +585,13 @@ func (c *clientConfig) parseURI() bool {
 		return false
 	}
 	if u.User != nil {
-		auth, err := url.QueryUnescape(u.User.String())
-		if err != nil {
-			return false
+		username := u.User.Username()
+		password, hasPassword := u.User.Password()
+		if hasPassword {
+			c.Auth = username + ":" + password
+		} else {
+			c.Auth = username
 		}
-		c.Auth = auth
 	}
 	c.Server = u.Host
 	q := u.Query()
@@ -433,6 +600,8 @@ func (c *clientConfig) parseURI() bool {
 		switch strings.ToLower(obfsType) {
 		case "salamander":
 			c.Obfs.Salamander.Password = q.Get("obfs-password")
+		case "gecko":
+			c.Obfs.Gecko.Password = q.Get("obfs-password")
 		}
 	}
 	if sni := q.Get("sni"); sni != "" {
@@ -444,11 +613,20 @@ func (c *clientConfig) parseURI() bool {
 	if pinSHA256 := q.Get("pinSHA256"); pinSHA256 != "" {
 		c.TLS.PinSHA256 = pinSHA256
 	}
+	if ech := q.Get("ech"); ech != "" {
+		c.TLS.ECH = ech
+	}
 	return true
 }
 
 // Config validates the fields and returns a ready-to-use Hysteria client config
 func (c *clientConfig) Config() (*client.Config, error) {
+	if realmAddr, ok, err := c.parseRealmAddr(); ok || err != nil {
+		if err != nil {
+			return nil, configError{Field: "server", Err: err}
+		}
+		return c.realmConfig(realmAddr)
+	}
 	c.parseURI()
 	hyConfig := &client.Config{}
 	fillers := []func(*client.Config) error{
@@ -457,6 +635,7 @@ func (c *clientConfig) Config() (*client.Config, error) {
 		c.fillAuth,
 		c.fillTLSConfig,
 		c.fillQUICConfig,
+		c.fillCongestionConfig,
 		c.fillBandwidthConfig,
 		c.fillFastOpen,
 	}
@@ -468,16 +647,209 @@ func (c *clientConfig) Config() (*client.Config, error) {
 	return hyConfig, nil
 }
 
-func runClient(cmd *cobra.Command, args []string) {
-	logger.Info("client mode")
+func (c *clientConfig) parseRealmAddr() (*realm.Addr, bool, error) {
+	addr, err := realm.ParseAddr(c.Server)
+	if err == nil {
+		return addr, true, nil
+	}
+	if strings.HasPrefix(c.Server, realm.SchemeHTTPS+":") || strings.HasPrefix(c.Server, realm.SchemeHTTP+":") {
+		return nil, true, err
+	}
+	return nil, false, nil
+}
 
-	if err := viper.ReadInConfig(); err != nil {
+func (c *clientConfig) realmConfig(addr *realm.Addr) (*client.Config, error) {
+	logger.Debug("realm client mode detected",
+		zap.String("realm", addr.RealmID),
+		zap.String("realmServer", addr.HostPort),
+		zap.String("scheme", addr.RendezvousScheme))
+	hyConfig := &client.Config{}
+	fillers := []func(*client.Config) error{
+		c.fillAuth,
+		c.fillTLSConfig,
+		c.fillQUICConfig,
+		c.fillCongestionConfig,
+		c.fillBandwidthConfig,
+		c.fillFastOpen,
+	}
+	for _, f := range fillers {
+		if err := f(hyConfig); err != nil {
+			return nil, err
+		}
+	}
+	if c.TLS.SNI == "" {
+		hyConfig.TLSConfig.ServerName = addr.Host
+	}
+	family, network, err := realmIPMode(c.Realm.IPMode)
+	if err != nil {
+		return nil, configError{Field: "realm.ipMode", Err: err}
+	}
+	so, err := c.socketOptions()
+	if err != nil {
+		return nil, err
+	}
+	var listenAddr *net.UDPAddr
+	if addr.LocalPort != 0 {
+		listenAddr = &net.UDPAddr{Port: addr.LocalPort}
+	}
+	baseConn, err := so.ListenUDPAddrNetwork(network, listenAddr)
+	if err != nil {
+		return nil, configError{Field: "realm", Err: err}
+	}
+	logger.Debug("realm client UDP socket opened",
+		zap.String("realm", addr.RealmID),
+		zap.String("local", baseConn.LocalAddr().String()))
+	success := false
+	defer func() {
+		if !success {
+			_ = baseConn.Close()
+		}
+	}()
+
+	ctx := context.Background()
+	// Gateway port mapping (UPnP/NAT-PMP) runs before STUN.
+	// With the pinhole in place, in a double-NAT setup,
+	// the address STUN observes corresponds to a path whose inner leg
+	// goes through the static mapping rather than a filtered dynamic one.
+	var mapper *realm.PortMapper
+	if c.Realm.PortMapping.Enabled {
+		localPort := baseConn.LocalAddr().(*net.UDPAddr).Port
+		mapper = newRealmPortMapper(ctx, addr.RealmID, localPort, c.Realm.PortMapping)
+		if mapper != nil {
+			defer func() {
+				if !success {
+					_ = mapper.Close()
+				}
+			}()
+		}
+	}
+	stunServers := c.realmSTUNServers(addr)
+	logger.Debug("realm client STUN discovery started",
+		zap.String("realm", addr.RealmID),
+		zap.Strings("stunServers", stunServers))
+	stunStart := time.Now()
+	localAddrs, err := realm.Discover(ctx, baseConn, realm.STUNConfig{
+		Servers: stunServers,
+		Timeout: c.Realm.STUNTimeout,
+		Family:  family,
+	})
+	if err != nil {
+		return nil, configError{Field: "realm.stun", Err: err}
+	}
+	logger.Debug("realm client STUN discovery completed",
+		zap.String("realm", addr.RealmID),
+		zap.Strings("addresses", addrPortStrings(localAddrs)),
+		zap.String("duration", formatLogDuration(time.Since(stunStart))))
+	if mapper != nil {
+		localAddrs = mergeMappedAddr(localAddrs, mapper.ExternalAddr())
+	}
+	meta, err := realm.NewPunchMetadata()
+	if err != nil {
+		return nil, configError{Field: "realm", Err: err}
+	}
+	attempt := shortAttempt(meta.Nonce)
+	rClient, err := realm.NewClientFromAddr(addr, c.realmHTTPClient())
+	if err != nil {
+		return nil, configError{Field: "realm", Err: err}
+	}
+	logger.Debug("realm client connect request started",
+		zap.String("realm", addr.RealmID),
+		zap.String("attempt", attempt),
+		zap.Strings("addresses", addrPortStrings(localAddrs)))
+	connectStart := time.Now()
+	connectResp, err := rClient.Connect(ctx, addr.RealmID, realm.ConnectRequest{
+		Addresses:     addrPortStrings(localAddrs),
+		PunchMetadata: meta,
+	})
+	if err != nil {
+		return nil, configError{Field: "realm.connect", Err: err}
+	}
+	logger.Debug("realm client connect response received",
+		zap.String("realm", addr.RealmID),
+		zap.String("attempt", attempt),
+		zap.Strings("serverAddresses", connectResp.Addresses),
+		zap.String("duration", formatLogDuration(time.Since(connectStart))))
+	peerAddrs, err := parseAddrPorts(connectResp.Addresses)
+	if err != nil {
+		return nil, configError{Field: "realm.connect.addresses", Err: err}
+	}
+	logger.Debug("realm client punch started",
+		zap.String("realm", addr.RealmID),
+		zap.String("attempt", attempt),
+		zap.Strings("candidates", connectResp.Addresses))
+	punchStart := time.Now()
+	result, err := realm.Punch(ctx, baseConn, localAddrs, peerAddrs, connectResp.PunchMetadata, realm.PunchConfig{
+		Timeout: c.Realm.PunchTimeout,
+		Family:  family,
+	})
+	if err != nil {
+		return nil, configError{Field: "realm.punch", Err: err}
+	}
+	logger.Debug("realm client punch completed",
+		zap.String("realm", addr.RealmID),
+		zap.String("attempt", attempt),
+		zap.String("peer", result.PeerAddr.String()),
+		zap.String("packet", punchPacketTypeString(result.Packet.Type)),
+		zap.String("duration", formatLogDuration(time.Since(punchStart))))
+	hyConfig.ServerAddr = udpAddrFromAddrPort(result.PeerAddr)
+	logger.Debug("realm client handing socket to QUIC",
+		zap.String("realm", addr.RealmID),
+		zap.String("peer", result.PeerAddr.String()))
+
+	finalConn, err := c.wrapObfs(baseConn)
+	if err != nil {
+		return nil, err
+	}
+	if mapper != nil {
+		mapCtx, mapCancel := context.WithCancel(context.Background())
+		go realmPortMapLoop(mapCtx, addr.RealmID, mapper)
+		finalConn = &cleanupPacketConn{PacketConn: finalConn, cleanup: mapCancel}
+	}
+	hyConfig.ConnFactory = &singleUseConnFactory{
+		Open: func() (net.PacketConn, error) { return finalConn, nil },
+	}
+	success = true
+	return hyConfig, nil
+}
+
+func (c *clientConfig) realmSTUNServers(addr *realm.Addr) []string {
+	if stunServers := addr.Params["stun"]; len(stunServers) > 0 {
+		return append([]string(nil), stunServers...)
+	}
+	if len(c.Realm.STUNServers) > 0 {
+		return append([]string(nil), c.Realm.STUNServers...)
+	}
+	return append([]string(nil), defaultRealmSTUNServers...)
+}
+
+func (c *clientConfig) realmHTTPClient() *stdHTTP.Client {
+	if !c.Realm.Insecure {
+		return nil
+	}
+	tr := stdHTTP.DefaultTransport.(*stdHTTP.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	return &stdHTTP.Client{Transport: tr}
+}
+
+func runClientCmd(cmd *cobra.Command, args []string) {
+	logger.Info("client mode")
+	runClient(defaultViper)
+}
+
+func runClient(v *viper.Viper) {
+	if err := v.ReadInConfig(); err != nil {
 		logger.Fatal("failed to read client config", zap.Error(err))
 	}
 	var config clientConfig
-	if err := viper.Unmarshal(&config); err != nil {
+	if err := v.Unmarshal(&config); err != nil {
 		logger.Fatal("failed to parse client config", zap.Error(err))
 	}
+
+	if err := config.validateMimic(); err != nil {
+		logger.Fatal("failed to load client config", zap.Error(err))
+	}
+	mimicInst := config.startMimic()
+	defer mimicInst.Close()
 
 	c, err := client.NewReconnectableClient(
 		config.Config,
@@ -490,7 +862,8 @@ func runClient(cmd *cobra.Command, args []string) {
 			if count == 1 && !disableUpdateCheck {
 				go runCheckUpdateClient(c)
 			}
-		}, config.Lazy)
+		}, config.Lazy,
+	)
 	if err != nil {
 		logger.Fatal("failed to initialize client", zap.Error(err))
 	}
@@ -887,27 +1260,84 @@ func normalizeCertHash(hash string) string {
 	return r
 }
 
-type adaptiveConnFactory struct {
-	NewFunc    func(addr net.Addr) (net.PacketConn, error)
-	Obfuscator obfs.Obfuscator // nil if no obfuscation
+// singleUseConnFactory invokes Open exactly once to produce the underlying
+// conn. It defers any allocation to the moment core/client.connect() actually
+// asks for the conn, so config-validation failures inside NewClient (e.g.
+// verifyAndFill rejecting a value) don't leak a socket. For the realm path
+// the conn is already open by the time we reach the factory, so Open just
+// returns it; for the regular path Open opens the UDP socket fresh.
+type singleUseConnFactory struct {
+	Open func() (net.PacketConn, error)
+
+	mu   sync.Mutex
+	used bool
 }
 
-func (f *adaptiveConnFactory) New(addr net.Addr) (net.PacketConn, error) {
-	if f.Obfuscator == nil {
-		return f.NewFunc(addr)
-	} else {
-		conn, err := f.NewFunc(addr)
+func (f *singleUseConnFactory) New(net.Addr) (net.PacketConn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.used {
+		return nil, errors.New("connection factory already used")
+	}
+	f.used = true
+	return f.Open()
+}
+
+func addrPortStrings(addrs []netip.AddrPort) []string {
+	out := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		out = append(out, addr.String())
+	}
+	return out
+}
+
+func parseAddrPorts(addrs []string) ([]netip.AddrPort, error) {
+	out := make([]netip.AddrPort, 0, len(addrs))
+	for _, s := range addrs {
+		addr, err := netip.ParseAddrPort(s)
 		if err != nil {
 			return nil, err
 		}
-		return obfs.WrapPacketConn(conn, f.Obfuscator), nil
+		out = append(out, addr)
 	}
+	return out, nil
+}
+
+func udpAddrFromAddrPort(addr netip.AddrPort) *net.UDPAddr {
+	return &net.UDPAddr{
+		IP:   net.IP(addr.Addr().AsSlice()),
+		Port: int(addr.Port()),
+	}
+}
+
+func shortAttempt(nonce string) string {
+	if len(nonce) <= 8 {
+		return nonce
+	}
+	return nonce[:8]
+}
+
+func punchPacketTypeString(t realm.PunchPacketType) string {
+	switch t {
+	case realm.PunchPacketHello:
+		return "hello"
+	case realm.PunchPacketAck:
+		return "ack"
+	default:
+		return "unknown"
+	}
+}
+
+func formatLogDuration(d time.Duration) string {
+	return d.Round(time.Millisecond).String()
 }
 
 func connectLog(info *client.HandshakeInfo, count int) {
 	logger.Info("connected to server",
+		zap.String("addr", info.ServerAddr.String()),
 		zap.Bool("udpEnabled", info.UDPEnabled),
 		zap.Uint64("tx", info.Tx),
+		zap.Bool("ech", info.ECHAccepted),
 		zap.Int("count", count))
 }
 
@@ -1057,4 +1487,62 @@ func (l *tunLogger) UDPError(addr string, err error) {
 	} else {
 		logger.Warn("TUN UDP error", zap.String("addr", addr), zap.Error(err))
 	}
+}
+
+// startMimic brings Mimic up for this client, if enabled. Every command that
+// opens a connection needs this, not just "client": Mimic has to be attached
+// before the first packet, or the server sees plain UDP and drops it.
+func (c *clientConfig) startMimic() *mimic.Instance {
+	if err := c.validateMimic(); err != nil {
+		logger.Fatal("failed to load client config", zap.Error(err))
+	}
+	if !c.Mimic.Enabled {
+		return nil
+	}
+	addrs, err := c.mimicServerAddrs()
+	if err != nil {
+		logger.Fatal("failed to resolve server address for mimic", zap.Error(err))
+	}
+	inst, err := mimic.Start(
+		mimic.Config{
+			Enabled:   c.Mimic.Enabled,
+			Interface: c.Mimic.Interface,
+			XDPMode:   c.Mimic.XDPMode,
+			Path:      c.Mimic.Path,
+			ExtraArgs: c.Mimic.ExtraArgs,
+		},
+		mimic.RoleClient, addrs, logger,
+		func(err error) { logger.Fatal("mimic stopped", zap.Error(err)) },
+	)
+	if err != nil {
+		logger.Fatal("failed to start mimic", zap.Error(err))
+	}
+	return inst
+}
+
+// mimicServerAddrs resolves the server address for Mimic's filters. Mimic needs
+// literal ip:port, and a name can resolve to several addresses across both
+// families, so every one of them gets a filter: the client re-resolves on each
+// reconnect and may pick a different one than it did at startup.
+func (c *clientConfig) mimicServerAddrs() ([]*net.UDPAddr, error) {
+	host, portStr, hostPort := parseServerAddrString(c.Server)
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid server port %q: %w", portStr, err)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []*net.UDPAddr{{IP: ip, Port: port}}, nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses for %s", hostPort)
+	}
+	addrs := make([]*net.UDPAddr, 0, len(ips))
+	for _, ip := range ips {
+		addrs = append(addrs, &net.UDPAddr{IP: ip, Port: port})
+	}
+	return addrs, nil
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"github.com/apernet/quic-go"
 	"github.com/apernet/quic-go/http3"
 	"github.com/v2fly/hysteria/core/v2/errors"
+	"github.com/v2fly/hysteria/core/v2/international/congestion"
 	"github.com/v2fly/hysteria/core/v2/international/pmtud"
 	"github.com/v2fly/hysteria/core/v2/international/utils"
 )
@@ -27,8 +29,11 @@ type Config struct {
 	TLSConfig             TLSConfig
 	QUICConfig            QUICConfig
 	Conn                  net.PacketConn
+	StatelessResetKey     *quic.StatelessResetKey
+	Cleanup               io.Closer
 	RequestHook           RequestHook
 	Outbound              Outbound
+	CongestionConfig      CongestionConfig
 	BandwidthConfig       BandwidthConfig
 	IgnoreClientBandwidth bool
 	DisableUDP            bool
@@ -79,6 +84,17 @@ func (c *Config) fill() error {
 		return errors.ConfigError{Field: "QUICConfig.MaxIncomingStreams", Reason: "must be at least 8"}
 	}
 	c.QUICConfig.DisablePathMTUDiscovery = c.QUICConfig.DisablePathMTUDiscovery || pmtud.DisablePathMTUDiscovery
+	var err error
+	c.CongestionConfig.Type, err = congestion.NormalizeType(c.CongestionConfig.Type)
+	if err != nil {
+		return errors.ConfigError{Field: "CongestionConfig.Type", Reason: err.Error()}
+	}
+	if c.CongestionConfig.Type == congestion.TypeBBR {
+		c.CongestionConfig.BBRProfile, err = congestion.NormalizeBBRProfile(c.CongestionConfig.BBRProfile)
+		if err != nil {
+			return errors.ConfigError{Field: "CongestionConfig.BBRProfile", Reason: err.Error()}
+		}
+	}
 	if c.Conn == nil {
 		return errors.ConfigError{Field: "Conn", Reason: "must be set"}
 	}
@@ -107,6 +123,8 @@ type TLSConfig struct {
 	Certificates   []tls.Certificate
 	GetCertificate func(info *tls.ClientHelloInfo) (*tls.Certificate, error)
 	ClientCAs      *x509.CertPool
+	ECHKeys        []tls.EncryptedClientHelloKey
+	GetECHKeys     func(info *tls.ClientHelloInfo) ([]tls.EncryptedClientHelloKey, error)
 }
 
 // QUICConfig contains the QUIC configuration fields that we want to expose to the user.
@@ -118,6 +136,13 @@ type QUICConfig struct {
 	MaxIdleTimeout                 time.Duration
 	MaxIncomingStreams             int64
 	DisablePathMTUDiscovery        bool // The server may still override this to true on unsupported platforms.
+	DisableGSO                     bool
+	DisableStatelessReset          bool
+}
+
+type CongestionConfig struct {
+	Type       string
+	BBRProfile string
 }
 
 // RequestHook allows filtering and modifying requests before the server connects to the remote.
@@ -137,9 +162,11 @@ type RequestHook interface {
 // Although UDP includes a reqAddr, the implementation does not necessarily have to use it
 // to make a "connected" UDP connection that does not accept packets from other addresses.
 // In fact, the default implementation simply uses net.ListenUDP for a "full-cone" behavior.
+// CheckUDP is used to check if a UDP packet to reqAddr is permitted (useful for e.g. ACL).
 type Outbound interface {
 	TCP(reqAddr string) (net.Conn, error)
 	UDP(reqAddr string) (UDPConn, error)
+	CheckUDP(reqAddr string) error
 }
 
 // UDPConn is like net.PacketConn, but uses string for addresses.
@@ -167,6 +194,10 @@ func (o *defaultOutbound) UDP(reqAddr string) (UDPConn, error) {
 	return &defaultUDPConn{conn}, nil
 }
 
+func (o *defaultOutbound) CheckUDP(reqAddr string) error {
+	return nil
+}
+
 type defaultUDPConn struct {
 	*net.UDPConn
 }
@@ -190,8 +221,9 @@ func (c *defaultUDPConn) WriteTo(b []byte, addr string) (int, error) {
 
 // BandwidthConfig describes the maximum bandwidth that the server can use, in bytes per second.
 type BandwidthConfig struct {
-	MaxTx uint64
-	MaxRx uint64
+	MaxTx                   uint64
+	MaxRx                   uint64
+	DisableLossCompensation bool
 }
 
 // Authenticator is an interface that provides authentication logic.
