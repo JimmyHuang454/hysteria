@@ -154,7 +154,7 @@ func (e *UdpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 
 // checkAddr checks outbound policy for the given address.
 // The decision is cached in e.aclCache for future use.
-func (e *udpSessionEntry) checkAddr(addr string) error {
+func (e *UdpSessionEntry) checkAddr(addr string) error {
 	if decision, ok := e.aclCache[addr]; ok {
 		return decision
 	}
